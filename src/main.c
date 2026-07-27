@@ -13,6 +13,8 @@
 
 #include "wifi_manager.h"
 #include "acquisition_manager.h"
+#include "traffic_generator.h"
+#include "wisens_config.h"
 
 static const char *TAG = "wisens_main";
 
@@ -55,6 +57,18 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "Wi-Fi connecte, etat = %d", wifi_manager_get_state());
+
+    /* Generateur de trafic : demarre AVANT l'acquisition, car sans trafic
+     * reseau actif, tres peu de trames sont recues et donc tres peu de
+     * mesures CSI sont capturees (voir "Emission Wi-Fi controlee",
+     * dossier projet chapitre 4.1). */
+    err = traffic_generator_start(WISENS_TRAFFIC_PING_INTERVAL_MS);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Echec demarrage generateur de trafic (%s). "
+                       "L'acquisition continuera mais avec un flux "
+                       "de mesures probablement tres faible.",
+                 esp_err_to_name(err));
+    }
 
     /* Acquisition CSI : uniquement une fois le Wi-Fi confirme connecte. */
     acquisition_manager_register_callback(on_csi_sample);

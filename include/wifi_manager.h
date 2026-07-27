@@ -21,6 +21,7 @@
 
 #include <stdbool.h>
 #include "esp_err.h"
+#include "esp_netif_ip_addr.h"
 #include "freertos/FreeRTOS.h"
 
 #ifdef __cplusplus
@@ -83,6 +84,19 @@ wifi_manager_state_t wifi_manager_get_state(void);
  * @return ESP_OK si la demande a été acceptée.
  */
 esp_err_t wifi_manager_reconnect(void);
+
+/**
+ * @brief Récupère l'adresse IPv4 de la passerelle réseau (routeur/hotspot).
+ *
+ * Utile pour le module traffic_generator, qui a besoin d'une cible fixe
+ * vers laquelle générer du trafic (indispensable pour obtenir des
+ * échantillons CSI : voir la section "Émission Wi-Fi contrôlée" du
+ * dossier projet).
+ *
+ * @param[out] out_gw_ip Rempli avec l'IP de la passerelle si disponible.
+ * @return ESP_OK si l'IP est disponible (Wi-Fi connecté), ESP_ERR_INVALID_STATE sinon.
+ */
+esp_err_t wifi_manager_get_gateway_ip(esp_ip4_addr_t *out_gw_ip);
 
 #ifdef __cplusplus
 }

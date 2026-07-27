@@ -48,4 +48,8 @@
 /** Active le mode "HT" (802.11n), utile si l'AP supporte le 11n. */
 #define WISENS_CSI_ENABLE_HT20    1
 
+/** Intervalle entre deux pings du générateur de trafic (ms).
+ *  Plus petit = flux CSI plus dense, mais plus de charge réseau/CPU. */
+#define WISENS_TRAFFIC_PING_INTERVAL_MS  200
+
 #endif /* WISENS_CONFIG_H */

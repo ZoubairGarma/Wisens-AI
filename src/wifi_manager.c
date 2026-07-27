@@ -37,6 +37,10 @@ static volatile wifi_manager_state_t s_state = WIFI_MGR_STATE_UNINITIALIZED;
 
 static esp_netif_t *s_netif_sta = NULL;
 
+/** IP de la passerelle, capturée depuis IP_EVENT_STA_GOT_IP. */
+static esp_ip4_addr_t s_gateway_ip = { 0 };
+static volatile bool s_gateway_ip_valid = false;
+
 /* ---------------------------------------------------------------------- */
 /*                          Prototypes privés                             */
 /* ---------------------------------------------------------------------- */
@@ -151,6 +155,18 @@ esp_err_t wifi_manager_reconnect(void)
     return esp_wifi_connect();
 }
 
+esp_err_t wifi_manager_get_gateway_ip(esp_ip4_addr_t *out_gw_ip)
+{
+    if (out_gw_ip == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_gateway_ip_valid) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    *out_gw_ip = s_gateway_ip;
+    return ESP_OK;
+}
+
 /* ---------------------------------------------------------------------- */
 /*                          Implémentation privée                         */
 /* ---------------------------------------------------------------------- */
@@ -183,6 +199,9 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *ip_evt = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Connecte, IP obtenue: " IPSTR, IP2STR(&ip_evt->ip_info.ip));
+
+        s_gateway_ip = ip_evt->ip_info.gw;
+        s_gateway_ip_valid = true;
 
         s_retry_count = 0;
         s_state = WIFI_MGR_STATE_CONNECTED;

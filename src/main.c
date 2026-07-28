@@ -8,6 +8,7 @@
  */
 
 #include "esp_log.h"
+#include <inttypes.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -22,18 +23,40 @@ static const char *TAG = "wisens_main";
  *  volatile car modifié dans un contexte différent de app_main(). */
 static volatile uint32_t s_sample_count = 0;
 
+/** Fréquence d'affichage détaillé : 1 échantillon sur N est loggé en
+ *  entier, pour valider les valeurs sans noyer la console (le CSI peut
+ *  arriver a plusieurs Hz, logguer chaque mesure serait trop verbeux
+ *  et ralentirait le contexte d'appel). */
+#define WISENS_LOG_SAMPLE_EVERY_N   5
+
 /**
  * @brief Callback appelé pour chaque mesure CSI reçue.
  *
- * Reste volontairement très léger (juste un compteur) : dans une
+ * Affiche 1 mesure sur WISENS_LOG_SAMPLE_EVERY_N avec ses vraies valeurs
+ * (RSSI, canal, taille du buffer CSI), pour valider que les données ont
+ * un sens physique avant de passer a l'export.
+ *
+ * Reste volontairement léger : pas de traitement lourd ici. Dans une
  * prochaine étape, ce callback copiera l'échantillon vers une file
  * FreeRTOS (queue) pour un traitement/export dans une tâche séparée,
  * sans jamais bloquer le contexte du driver Wi-Fi.
  */
 static void on_csi_sample(const wisens_csi_sample_t *sample)
 {
-    (void)sample;
     s_sample_count++;
+
+    if ((s_sample_count % WISENS_LOG_SAMPLE_EVERY_N) == 0) {
+        ESP_LOGI(TAG,
+                 "Mesure #%" PRIu32 " | t=%lld us | rssi=%d dBm | "
+                 "canal=%u | csi_len=%u octets | mac=%02x:%02x:%02x:%02x:%02x:%02x",
+                 s_sample_count,
+                 (long long)sample->timestamp_us,
+                 sample->rssi,
+                 sample->channel,
+                 sample->csi_len,
+                 sample->mac[0], sample->mac[1], sample->mac[2],
+                 sample->mac[3], sample->mac[4], sample->mac[5]);
+    }
 }
 
 void app_main(void)

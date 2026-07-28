@@ -18,8 +18,8 @@
 /*                          Paramètres Wi-Fi (STA)                        */
 /* ---------------------------------------------------------------------- */
 
-#define WISENS_WIFI_SSID          "POCO F3"
-#define WISENS_WIFI_PASSWORD      "noussa1233"
+#define WISENS_WIFI_SSID          "Tunisie_Telecom-2.4G-2B3E"
+#define WISENS_WIFI_PASSWORD      "W9ce5014e6"
 
 /** Nombre max de tentatives de reconnexion avant abandon. */
 #define WISENS_WIFI_MAX_RETRY     5
@@ -51,5 +51,19 @@
 /** Intervalle entre deux pings du générateur de trafic (ms).
  *  Plus petit = flux CSI plus dense, mais plus de charge réseau/CPU. */
 #define WISENS_TRAFFIC_PING_INTERVAL_MS  200
+
+/** Fréquence (en nombre d'échantillons) d'affichage détaillé du RSSI. */
+#define WISENS_LOG_SAMPLE_EVERY_N        5
+
+/** Fréquence d'inspection des valeurs CSI brutes (I/Q + amplitude).
+ *  Plus rare que le log RSSI car plus verbeux. */
+#define WISENS_LOG_RAW_CSI_EVERY_N       25
+
+/** Taille attendue (en octets) du buffer CSI pour une trame HT20 valide.
+ *  Les mesures d'une autre taille (trames legacy 802.11b/g par exemple)
+ *  sont rejetees, pour garantir un vecteur de features de taille fixe
+ *  (indispensable pour l'entrainement des modeles IA : KNN, SVM,
+ *  Random Forest, etc. qui exigent des lignes de meme dimension). */
+#define WISENS_CSI_EXPECTED_LEN          384
 
 #endif /* WISENS_CONFIG_H */

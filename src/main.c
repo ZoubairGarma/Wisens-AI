@@ -9,6 +9,7 @@
 
 #include "esp_log.h"
 #include <inttypes.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -23,18 +24,13 @@ static const char *TAG = "wisens_main";
  *  volatile car modifié dans un contexte différent de app_main(). */
 static volatile uint32_t s_sample_count = 0;
 
-/** Fréquence d'affichage détaillé : 1 échantillon sur N est loggé en
- *  entier, pour valider les valeurs sans noyer la console (le CSI peut
- *  arriver a plusieurs Hz, logguer chaque mesure serait trop verbeux
- *  et ralentirait le contexte d'appel). */
-#define WISENS_LOG_SAMPLE_EVERY_N   5
-
 /**
  * @brief Callback appelé pour chaque mesure CSI reçue.
  *
- * Affiche 1 mesure sur WISENS_LOG_SAMPLE_EVERY_N avec ses vraies valeurs
- * (RSSI, canal, taille du buffer CSI), pour valider que les données ont
- * un sens physique avant de passer a l'export.
+ * Affiche 1 mesure sur WISENS_LOG_SAMPLE_EVERY_N avec le RSSI (validation
+ * rapide), et 1 mesure sur WISENS_LOG_RAW_CSI_EVERY_N avec les vraies
+ * valeurs CSI brutes (paires I/Q + amplitude), pour vérifier que les
+ * données ont un sens physique avant de passer a l'export.
  *
  * Reste volontairement léger : pas de traitement lourd ici. Dans une
  * prochaine étape, ce callback copiera l'échantillon vers une file
@@ -43,6 +39,13 @@ static volatile uint32_t s_sample_count = 0;
  */
 static void on_csi_sample(const wisens_csi_sample_t *sample)
 {
+    /* Filtre de taille : on ne garde que les mesures de taille fixe
+     * attendue, pour garantir un vecteur de features homogene dans le
+     * futur dataset (voir wisens_config.h : WISENS_CSI_EXPECTED_LEN). */
+    if (sample->csi_len != WISENS_CSI_EXPECTED_LEN) {
+        return;
+    }
+
     s_sample_count++;
 
     if ((s_sample_count % WISENS_LOG_SAMPLE_EVERY_N) == 0) {
@@ -56,6 +59,24 @@ static void on_csi_sample(const wisens_csi_sample_t *sample)
                  sample->csi_len,
                  sample->mac[0], sample->mac[1], sample->mac[2],
                  sample->mac[3], sample->mac[4], sample->mac[5]);
+    }
+
+    /* Inspection des valeurs CSI brutes (moins frequent, plus verbeux). */
+    if ((s_sample_count % WISENS_LOG_RAW_CSI_EVERY_N) == 0 && sample->csi_len >= 20) {
+        char buf[160];
+        int off = 0;
+        off += snprintf(buf + off, sizeof(buf) - off, "CSI brut (10 premieres paires I/Q): ");
+        for (int i = 0; i < 10 && (i * 2 + 1) < sample->csi_len; i++) {
+            int8_t I = sample->csi_data[i * 2];
+            int8_t Q = sample->csi_data[i * 2 + 1];
+            off += snprintf(buf + off, sizeof(buf) - off, "(%d,%d) ", I, Q);
+        }
+        ESP_LOGI(TAG, "%s", buf);
+
+        int8_t I0 = sample->csi_data[0];
+        int8_t Q0 = sample->csi_data[1];
+        float amplitude0 = sqrtf((float)(I0 * I0 + Q0 * Q0));
+        ESP_LOGI(TAG, "Amplitude sous-porteuse 0 = %.2f", amplitude0);
     }
 }
 

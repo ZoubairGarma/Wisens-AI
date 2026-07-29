@@ -17,6 +17,7 @@
 #include "acquisition_manager.h"
 #include "traffic_generator.h"
 #include "wisens_config.h"
+#include "csv_exporter.h"
 
 static const char *TAG = "wisens_main";
 
@@ -45,6 +46,7 @@ static void on_csi_sample(const wisens_csi_sample_t *sample)
     if (sample->csi_len != WISENS_CSI_EXPECTED_LEN) {
         return;
     }
+    csv_exporter_send_sample(sample);
 
     s_sample_count++;
 
@@ -101,6 +103,7 @@ void app_main(void)
     }
 
     ESP_LOGI(TAG, "Wi-Fi connecte, etat = %d", wifi_manager_get_state());
+    csv_exporter_init();
 
     /* Generateur de trafic : demarre AVANT l'acquisition, car sans trafic
      * reseau actif, tres peu de trames sont recues et donc tres peu de

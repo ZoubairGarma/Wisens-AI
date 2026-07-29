@@ -3,28 +3,35 @@ collect_csi.py - Capture des mesures CSI WISENS-AI depuis le port serie
                  et sauvegarde dans un fichier CSV nomme par experience,
                  avec les metadonnees d'experience en colonnes.
 
+                 La capture s'arrete automatiquement apres une duree fixe
+                 (5 minutes par defaut), pour garantir des sessions de
+                 longueur homogene entre scenarios (voir dossier projet,
+                 section 5.3 "Contraintes d'installation").
+
 Usage:
     python collect_csi.py EXP_001 piece_vide --distance 3.0 --comment "test initial"
     python collect_csi.py EXP_002 mouvement_faible --ground-truth presence_mouvement
-
-Le fichier de sortie sera : data/EXP_001_piece_vide.csv
+    python collect_csi.py EXP_003 mouvement_fort --duration 180
 """
 
 import argparse
 import csv
 import os
 import sys
+import time
 
 import serial
 
 PORT = "COM3"
 BAUD = 115200
 OUTPUT_DIR = "data"
+DEFAULT_DURATION_S = 300  # 5 minutes
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Capture des mesures CSI WISENS-AI vers un fichier CSV."
+        description="Capture des mesures CSI WISENS-AI vers un fichier CSV, "
+                     "pendant une duree fixe."
     )
     parser.add_argument("experiment_id", help="Identifiant de l'experience, ex: EXP_001")
     parser.add_argument("scenario", help="Nom du scenario, ex: piece_vide, mouvement_faible")
@@ -36,6 +43,10 @@ def parse_args():
     parser.add_argument("--comment", default="",
                          help="Commentaire libre sur les conditions de test")
     parser.add_argument("--port", default=PORT, help=f"Port serie (defaut: {PORT})")
+    parser.add_argument("--duration", type=int, default=DEFAULT_DURATION_S,
+                         help=f"Duree de capture en secondes (defaut: {DEFAULT_DURATION_S} "
+                              f"= 5 minutes). La capture s'arrete automatiquement "
+                              f"a l'ecoulement de ce delai.")
     return parser.parse_args()
 
 
@@ -43,6 +54,11 @@ def build_output_path(experiment_id: str, scenario: str) -> str:
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     filename = f"{experiment_id}_{scenario}.csv"
     return os.path.join(OUTPUT_DIR, filename)
+
+
+def format_remaining(seconds_left: float) -> str:
+    minutes, seconds = divmod(int(max(seconds_left, 0)), 60)
+    return f"{minutes:02d}:{seconds:02d}"
 
 
 def main():
@@ -66,10 +82,15 @@ def main():
     saved_count = 0
     skipped_count = 0
 
-    print(f"Ecoute sur {args.port}... (Ctrl+C pour arreter)")
+    print(f"Ecoute sur {args.port}... (duree fixe: {args.duration}s, "
+          f"Ctrl+C pour arreter plus tot)")
     print(f"Experience: {args.experiment_id} | Zone: {args.zone} | "
           f"Scenario: {args.scenario} | Distance: {args.distance} m")
     print(f"Sauvegarde vers: {output_path}")
+
+    start_time = time.monotonic()
+    end_time = start_time + args.duration
+    last_progress_print = 0.0
 
     try:
         with open(output_path, "w", newline="") as file:
@@ -81,6 +102,20 @@ def main():
             ])
 
             while True:
+                now = time.monotonic()
+                if now >= end_time:
+                    print(f"\nDuree de {args.duration}s atteinte, arret automatique.")
+                    break
+
+                # Affichage du temps restant toutes les ~10 secondes,
+                # sans dependre du debit de mesures recues (utile si le
+                # flux CSI est faible ou interrompu).
+                if now - last_progress_print >= 10:
+                    remaining = end_time - now
+                    print(f"[{format_remaining(remaining)} restant] "
+                          f"{saved_count} mesures sauvegardees...")
+                    last_progress_print = now
+
                 try:
                     raw_line = ser.readline().decode(errors="ignore").strip()
                 except serial.SerialException as exc:
@@ -111,17 +146,17 @@ def main():
 
                 if saved_count % 50 == 0:
                     file.flush()
-                    print(f"{saved_count} mesures sauvegardees...")
 
     except KeyboardInterrupt:
-        print("\nArret demande par l'utilisateur.")
+        print("\nArret demande par l'utilisateur (avant la fin de la duree prevue).")
     finally:
         ser.close()
-        print(f"\nTermine. {saved_count} mesures sauvegardees, "
+        elapsed = time.monotonic() - start_time
+        print(f"\nTermine. Duree reelle: {elapsed:.1f}s | "
+              f"{saved_count} mesures sauvegardees, "
               f"{skipped_count} lignes ignorees (corrompues).")
         print(f"Fichier: {os.path.abspath(output_path)}")
 
 
 if __name__ == "__main__":
     main()
-    

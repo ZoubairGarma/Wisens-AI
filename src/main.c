@@ -18,6 +18,7 @@
 #include "traffic_generator.h"
 #include "wisens_config.h"
 #include "csv_exporter.h"
+#include "marker_button.h"
 
 static const char *TAG = "wisens_main";
 
@@ -46,21 +47,32 @@ static void on_csi_sample(const wisens_csi_sample_t *sample)
     if (sample->csi_len != WISENS_CSI_EXPECTED_LEN) {
         return;
     }
-    csv_exporter_send_sample(sample);
+
+    /* Etat courant du bouton marqueur (voir marker_button.h) : simple
+     * lecture volatile, mise a jour en temps reel par l'operateur via
+     * IO38 pendant les scenarios de transition (S4/S5/S6). Pour les
+     * scenarios sans transition, l'etat reste "empty" par defaut et
+     * n'a pas d'impact : le label a utiliser dans ce cas est le
+     * --ground-truth passe a collect_csi.py. */
+    const char *marker_label = marker_button_state_to_string(marker_button_get_state());
+
+    csv_exporter_send_sample(sample, marker_label);
 
     s_sample_count++;
 
     if ((s_sample_count % WISENS_LOG_SAMPLE_EVERY_N) == 0) {
         ESP_LOGI(TAG,
                  "Mesure #%" PRIu32 " | t=%lld us | rssi=%d dBm | "
-                 "canal=%u | csi_len=%u octets | mac=%02x:%02x:%02x:%02x:%02x:%02x",
+                 "canal=%u | csi_len=%u octets | mac=%02x:%02x:%02x:%02x:%02x:%02x | "
+                 "marker=%s",
                  s_sample_count,
                  (long long)sample->timestamp_us,
                  sample->rssi,
                  sample->channel,
                  sample->csi_len,
                  sample->mac[0], sample->mac[1], sample->mac[2],
-                 sample->mac[3], sample->mac[4], sample->mac[5]);
+                 sample->mac[3], sample->mac[4], sample->mac[5],
+                 marker_label);
     }
 
     /* Inspection des valeurs CSI brutes (moins frequent, plus verbeux). */
@@ -105,6 +117,14 @@ void app_main(void)
     ESP_LOGI(TAG, "Wi-Fi connecte, etat = %d", wifi_manager_get_state());
     csv_exporter_init();
 
+    /* Bouton marqueur : initialise avant l'acquisition, pour que l'etat
+     * "empty" soit deja actif des la premiere mesure capturee. */
+    err = marker_button_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Echec init bouton marqueur (%s)", esp_err_to_name(err));
+        return;
+    }
+
     /* Generateur de trafic : demarre AVANT l'acquisition, car sans trafic
      * reseau actif, tres peu de trames sont recues et donc tres peu de
      * mesures CSI sont capturees (voir "Emission Wi-Fi controlee",
@@ -146,10 +166,12 @@ void app_main(void)
      * ------------------------------------------------------------- */
 
     while (1) {
-        ESP_LOGI(TAG, "WISENS-AI actif | wifi=%d | csi_running=%d | echantillons=%u",
+        ESP_LOGI(TAG, "WISENS-AI actif | wifi=%d | csi_running=%d | echantillons=%u | "
+                       "marker=%s",
                  wifi_manager_get_state(),
                  acquisition_manager_is_running(),
-                 (unsigned int)s_sample_count);
+                 (unsigned int)s_sample_count,
+                 marker_button_state_to_string(marker_button_get_state()));
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }

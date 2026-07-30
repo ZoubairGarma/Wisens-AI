@@ -22,11 +22,18 @@ void csv_exporter_init(void)
 
 
 void csv_exporter_send_sample(
-        const wisens_csi_sample_t *sample)
+        const wisens_csi_sample_t *sample,
+        const char *marker_state)
 {
 
     if(sample == NULL)
         return;
+
+    if (marker_state == NULL) {
+        marker_state = "empty";   /* valeur par defaut si marker_button
+                                    * n'est pas utilise (ex: scenarios
+                                    * S0-S3 sans transition). */
+    }
 
 
     /*
@@ -38,7 +45,8 @@ void csv_exporter_send_sample(
      * channel,
      * MAC,
      * length,
-     * CSI values
+     * CSI values,
+     * marker_state
      */
 
 
@@ -73,5 +81,5 @@ void csv_exporter_send_sample(
     }
 
 
-    printf("\n");
+    printf(",%s\n", marker_state);
 }

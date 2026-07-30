@@ -109,7 +109,7 @@ def main():
             writer.writerow([
                 "timestamp_us", "rssi", "channel", "mac", "csi_len", "csi_data",
                 "experiment_id", "zone_id", "scenario",
-                "distance_tx_rx_m", "ground_truth", "comment",
+                "distance_tx_rx_m", "ground_truth", "comment","marker_state"
             ])
 
             while True:
@@ -140,7 +140,7 @@ def main():
 
                 # Une ligne valide a exactement 7 champs :
                 # ["CSV", timestamp, rssi, channel, mac, csi_len, csi_data]
-                if len(fields) != 7:
+                if len(fields) != 8:
                     skipped_count += 1
                     continue
 

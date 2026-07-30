@@ -19,7 +19,7 @@ static const char *TAG = "wisens_marker";
 /** Anti-rebond : ignore les interruptions successives trop rapprochées
  *  (un vrai appui humain ne peut pas générer deux fronts utiles en
  *  moins de 200ms ; les rebonds mécaniques eux arrivent en <10ms). */
-#define MARKER_DEBOUNCE_US      200000
+#define MARKER_DEBOUNCE_US      500000
 
 static volatile marker_state_t s_state = MARKER_STATE_EMPTY;
 static volatile int64_t s_last_press_us = 0;
@@ -27,7 +27,7 @@ static volatile int64_t s_last_press_us = 0;
 /** Handle de la tâche à notifier pour affichage (hors contexte ISR). */
 static TaskHandle_t s_notify_task_handle = NULL;
 
-static void IRAM_ATTR marker_button_isr_handler(void *arg);
+static void marker_button_isr_handler(void *arg);
 static void marker_notify_task(void *arg);
 static marker_state_t next_state(marker_state_t current);
 

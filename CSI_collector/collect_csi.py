@@ -25,7 +25,7 @@ import serial
 PORT = "COM3"
 BAUD = 115200
 OUTPUT_DIR = "data"
-DEFAULT_DURATION_S = 300  # 5 minutes
+DEFAULT_DURATION_S = 300 # 5 minutes
 
 
 def parse_args():
@@ -87,6 +87,17 @@ def main():
     print(f"Experience: {args.experiment_id} | Zone: {args.zone} | "
           f"Scenario: {args.scenario} | Distance: {args.distance} m")
     print(f"Sauvegarde vers: {output_path}")
+
+        # Delay avant démarrage (pour te laisser sortir de la scène)
+    START_DELAY_S = 10
+
+    print(f"\nDemarrage dans {START_DELAY_S} secondes...")
+
+    for i in range(START_DELAY_S, 0, -1):
+        print(f"  -> {i}...")
+        time.sleep(1)
+
+    print(">>> Capture en cours ! <<<\n")
 
     start_time = time.monotonic()
     end_time = start_time + args.duration

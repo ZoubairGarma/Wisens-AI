@@ -49,9 +49,11 @@ OUTPUT_CSV_PREVIEW = "dataset_features_preview.csv"
 # Parametres de fenetrage (ETAPE 5)
 # ----------------------------------------------------------------------
 
-WINDOW_SIZE = 5      # ~1 seconde a ~5 Hz (intervalle de ping ~200ms)
-STRIDE = 3           # recouvrement ~40% -> plus de fenetres, utile pour
-                      # les classes minoritaires (transition, stable)
+WINDOW_SIZE = 10     # ~2 secondes a ~5 Hz (etait 5 = ~1s ; plus de contexte
+                      # temporel pour distinguer low/high motion et
+                      # complex_activity, qui sont des PATTERNS, pas des
+                      # instants isoles)
+STRIDE = 5            # recouvrement ~50%
 
 
 # ========================================================================
@@ -171,6 +173,45 @@ def count_local_peaks(signal: np.ndarray) -> int:
     return int(np.sum(is_peak))
 
 
+def get_subcarrier_amplitude_matrix(window_df: pd.DataFrame) -> np.ndarray:
+    """Retourne une matrice (n_mesures x n_sous_porteuses) d'amplitudes,
+    SANS moyenner les sous-porteuses entre elles -- contrairement a
+    compute_mean_amplitude() qui ecrase toute la diversite spatiale du
+    signal CSI. Chaque colonne represente l'evolution d'UNE sous-porteuse
+    au fil des mesures de la fenetre."""
+    matrix = np.stack([
+        np.asarray(v, dtype=np.float64) for v in window_df["csi_values"]
+    ])
+    I = matrix[:, 0::2]
+    Q = matrix[:, 1::2]
+    return np.sqrt(I**2 + Q**2)   # shape: (n_mesures, n_sous_porteuses)
+
+
+def extract_subcarrier_diversity_features(window_df: pd.DataFrame) -> dict:
+    """Features complementaires aux 9 du dossier projet (section 8.2),
+    qui captent SPECIFIQUEMENT la diversite de comportement entre
+    sous-porteuses -- l'information que compute_mean_amplitude() perd
+    en moyennant tout. Le mouvement affecte generalement certaines
+    sous-porteuses beaucoup plus que d'autres (sensibilite au
+    multi-trajet variable selon la frequence), contrairement au bruit
+    de fond qui affecte les sous-porteuses de facon plus uniforme."""
+    amp_matrix = get_subcarrier_amplitude_matrix(window_df)   # (n_mesures, n_sc)
+
+    std_per_subcarrier = amp_matrix.std(axis=0)   # dispersion temporelle, PAR sous-porteuse
+
+    mean_std = float(np.mean(std_per_subcarrier))
+    max_std = float(np.max(std_per_subcarrier))
+    std_std = float(np.std(std_per_subcarrier))
+    peakiness = float(max_std / (mean_std + 1e-9))
+
+    return {
+        "subcarrier_std_mean": mean_std,
+        "subcarrier_std_max": max_std,
+        "subcarrier_std_std": std_std,
+        "subcarrier_std_peakiness": peakiness,
+    }
+
+
 def extract_features_from_window(window_df: pd.DataFrame) -> dict:
     signal = window_df["amplitude_norm"].to_numpy()
 
@@ -198,7 +239,7 @@ def extract_features_from_window(window_df: pd.DataFrame) -> dict:
     # pour respecter exactement l'intitule du dossier projet.
     amplitude_moyenne_csi = float(np.mean(window_df["amplitude_raw"].to_numpy()))
 
-    return {
+    features = {
         "moyenne": moyenne,
         "variance": variance,
         "ecart_type": ecart_type,
@@ -210,6 +251,8 @@ def extract_features_from_window(window_df: pd.DataFrame) -> dict:
         "stabilite_temporelle": stabilite_temporelle,
         "amplitude_moyenne_csi": amplitude_moyenne_csi,
     }
+    features.update(extract_subcarrier_diversity_features(window_df))
+    return features
 
 
 def build_feature_table(windows: list) -> pd.DataFrame:

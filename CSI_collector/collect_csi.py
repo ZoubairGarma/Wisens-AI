@@ -24,7 +24,7 @@ import serial
 
 PORT = "COM3"
 BAUD = 115200
-OUTPUT_DIR = "data"
+OUTPUT_DIR = "data_zone2"
 DEFAULT_DURATION_S = 300 # 5 minutes
 
 
@@ -35,7 +35,7 @@ def parse_args():
     )
     parser.add_argument("experiment_id", help="Identifiant de l'experience, ex: EXP_001")
     parser.add_argument("scenario", help="Nom du scenario, ex: piece_vide, mouvement_faible")
-    parser.add_argument("--zone", default="ZONE_01", help="Identifiant de la zone (defaut: ZONE_01)")
+    parser.add_argument("--zone", default="ZONE_02", help="Identifiant de la zone (defaut: ZONE_02)")
     parser.add_argument("--distance", type=float, default=0.0,
                          help="Distance emetteur/recepteur en metres (defaut: 0.0)")
     parser.add_argument("--ground-truth", default=None,

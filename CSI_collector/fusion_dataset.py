@@ -23,9 +23,9 @@ import os
 
 import pandas as pd
 
-DATA_DIR = "data"
-OUTPUT_CSV = "dataset_fusionne.csv"
-OUTPUT_PARQUET = "dataset_fusionne.parquet"
+DATA_DIR = "data_zone2"
+OUTPUT_CSV = "dataset2_fusionne.csv"
+OUTPUT_PARQUET = "dataset2_fusionne.parquet"
 
 # Schema avec marker_state (13 colonnes) - fichiers generes apres
 # l'ajout du bouton marqueur.

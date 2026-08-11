@@ -24,9 +24,9 @@ import os
 
 import pandas as pd
 
-INPUT_PARQUET = "dataset_fusionne.parquet"    # sortie de fusion_dataset.py
-OUTPUT_PARQUET = "dataset_nettoye.parquet"
-OUTPUT_CSV_PREVIEW = "dataset_nettoye_preview.csv"   # extrait lisible, sans les vecteurs CSI
+INPUT_PARQUET = "dataset2_fusionne.parquet"    # sortie de fusion_dataset.py
+OUTPUT_PARQUET = "dataset2_nettoye.parquet"
+OUTPUT_CSV_PREVIEW = "dataset2_nettoye_preview.csv"   # extrait lisible, sans les vecteurs CSI
 
 # ----------------------------------------------------------------------
 # Constantes de nettoyage

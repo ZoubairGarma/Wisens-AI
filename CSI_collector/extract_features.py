@@ -1,33 +1,48 @@
 """
-extract_features.py - WISENS-AI : Alignement temporel, normalisation,
-                       segmentation par fenetres, extraction des 9
-                       caracteristiques (dossier projet, sections 8.1-8.2)
+extract_features.py - WISENS-AI : Extraction de features CSI (v2)
 
-Pipeline (dans l'ordre du dossier projet) :
+Pipeline :
+    dataset2_nettoye.parquet (clean_dataset.py)
+        -> alignement temporel
+        -> normalisation par session (reference de calibration, pas
+           destructive : voir NORMALISATION ci-dessous)
+        -> segmentation par fenetres (session + label constants)
+        -> extraction de ~50 features en 6 groupes (A-F)
+        -> dataset2_features.parquet
 
-  ETAPE 3 - Alignement temporel
-      Trie chaque session par timestamp_us, verifie l'absence de trous
-      anormaux entre mesures consecutives.
+CHANGEMENT MAJEUR vs version precedente :
+    L'ancienne version reduisait chaque mesure CSI (384 valeurs I/Q)
+    a UN SEUL scalaire (amplitude moyenne sur toutes les sous-porteuses)
+    avant tout calcul temporel. Cette reduction ecrasait l'information
+    sur QUELLES sous-porteuses varient -- une cause probable de la
+    confusion persistante entre mouvement faible (C1) et mouvement fort
+    (C2/C3), observee identiquement sur 4 algorithmes differents.
 
-  ETAPE 4 - Normalisation
-      Convertit chaque mesure CSI (380 valeurs I/Q brutes) en UN SEUL
-      signal d'amplitude moyenne par mesure : amplitude par sous-porteuse
-      = sqrt(I^2 + Q^2), moyennee sur toutes les sous-porteuses.
-      Ce signal d'amplitude est ensuite normalise (z-score) PAR SESSION
-      (chaque session a sa propre moyenne/ecart-type de reference,
-      pour ne pas melanger les echelles entre sessions differentes).
+    Cette version conserve la matrice complete (n_mesures x
+    n_sous_porteuses) le plus longtemps possible dans le pipeline, et
+    en extrait des features de DISTRIBUTION et de DIVERSITE entre
+    sous-porteuses (groupes B et E), en plus des features globales et
+    temporelles classiques (groupes A, C, D) et du RSSI (groupe F).
 
-  ETAPE 5 - Segmentation par fenetres temporelles
-      Chaque session est d'abord decoupee en blocs de label constant
-      (une fenetre ne doit JAMAIS chevaucher un changement de label,
-      ni chevaucher deux sessions differentes). A l'interieur de
-      chaque bloc, fenetres glissantes de WINDOW_SIZE mesures avec un
-      recouvrement de OVERLAP.
+NORMALISATION :
+    Les groupes A, B, D (amplitude brute, distribution par sous-
+    porteuse, pics) restent en ECHELLE ABSOLUE (brute) -- l'information
+    de distance/environnement y reste presente, mais ce n'est plus
+    problematique ici puisque ce script ne sert qu'a UNE seule zone a
+    la fois (contrairement a l'ancienne tentative de normalisation
+    complete qui avait detruit du signal reel, voir historique).
 
-  ETAPE 8.2 - Calcul des 9 caracteristiques (par fenetre)
-      Moyenne, variance, ecart-type, max, min, energie du signal,
-      nombre de pics, variation moyenne, stabilite temporelle,
-      amplitude moyenne CSI -- exactement la liste du dossier projet.
+    Le groupe C (dynamique temporelle, differences) est calcule sur une
+    matrice mise a l'echelle par session (division par l'ecart-type de
+    l'amplitude de la session -- PAS une soustraction de moyenne, pour
+    eviter la degenerescence observee precedemment sur les sessions a
+    faible variance). Ca rend les features de VARIATION comparables
+    entre sessions de puissance de signal differente, sans supprimer
+    l'information de variation elle-meme.
+
+    Aucune normalisation n'utilise de statistique calculee sur plus
+    d'une session, ni sur le jeu de test (prevention de fuite de
+    donnees, voir ROBUSTESSE).
 
 Dependances :
     pip install pandas numpy pyarrow
@@ -36,24 +51,27 @@ Usage :
     python extract_features.py
 """
 
+from __future__ import annotations
+
 import os
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-INPUT_PARQUET = "dataset_nettoye.parquet"       # sortie de clean_dataset.py
-OUTPUT_PARQUET = "dataset_features.parquet"
-OUTPUT_CSV_PREVIEW = "dataset_features_preview.csv"
-
 # ----------------------------------------------------------------------
-# Parametres de fenetrage (ETAPE 5)
+# Configuration
 # ----------------------------------------------------------------------
 
-WINDOW_SIZE = 10     # ~2 secondes a ~5 Hz (etait 5 = ~1s ; plus de contexte
-                      # temporel pour distinguer low/high motion et
-                      # complex_activity, qui sont des PATTERNS, pas des
-                      # instants isoles)
-STRIDE = 5            # recouvrement ~50%
+INPUT_PARQUET = "dataset2_nettoye.parquet"          # sortie de clean_dataset.py
+OUTPUT_PARQUET = "dataset2_features.parquet"
+OUTPUT_CSV_PREVIEW = "dataset2_features_preview.csv"
+
+WINDOW_SIZE = 10
+STRIDE = 5
+GAP_THRESHOLD_US = 2_000_000   # 2 secondes
+
+EPS = 1e-9   # evite les divisions par zero sans fausser les ratios
 
 
 # ========================================================================
@@ -63,14 +81,11 @@ STRIDE = 5            # recouvrement ~50%
 def align_temporal(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_values(["session_id", "timestamp_us"]).reset_index(drop=True)
 
-    # Verification des trous anormaux (> 2 secondes) entre mesures
-    # consecutives d'une meme session -> signale, ne supprime rien
-    # automatiquement (utile pour reperer des sessions interrompues).
     df["gap_us"] = df.groupby("session_id")["timestamp_us"].diff()
-    big_gaps = df[df["gap_us"] > 2_000_000]   # > 2s
+    big_gaps = df[df["gap_us"] > GAP_THRESHOLD_US]
     if not big_gaps.empty:
-        print(f"ATTENTION: {len(big_gaps)} trous > 2s detectes dans "
-              f"{big_gaps['session_id'].nunique()} session(s). "
+        print(f"ATTENTION: {len(big_gaps)} trous > {GAP_THRESHOLD_US/1e6:.0f}s "
+              f"detectes dans {big_gaps['session_id'].nunique()} session(s). "
               f"Sessions concernees: {sorted(big_gaps['session_id'].unique())}")
 
     print(f"[Etape 3] Alignement temporel termine: {len(df)} lignes triees "
@@ -79,39 +94,57 @@ def align_temporal(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ========================================================================
-# ETAPE 4 - Normalisation
+# Conversion CSI brut -> amplitudes par sous-porteuse
 # ========================================================================
 
-def compute_mean_amplitude(csi_values: list) -> float:
-    """Amplitude moyenne sur toutes les sous-porteuses pour UNE mesure.
-    csi_values est une liste [I0,Q0,I1,Q1,...] (deja nettoyee, sans les
-    valeurs placeholder -- voir clean_dataset.py)."""
-    arr = np.asarray(csi_values, dtype=np.float64)
+def compute_csi_amplitudes(csi_values) -> Optional[np.ndarray]:
+    """Convertit une liste [I0,Q0,I1,Q1,...] en amplitudes par sous-porteuse
+    (sqrt(I^2+Q^2)). Retourne None si le vecteur est malforme (longueur
+    impaire, vide, valeurs non numeriques) -- la mesure sera alors ecartee
+    plus loin, avec un avertissement, plutot que de faire planter le script."""
+    try:
+        arr = np.asarray(csi_values, dtype=np.float64)
+    except (TypeError, ValueError):
+        return None
+
+    if arr.ndim != 1 or arr.size == 0 or arr.size % 2 != 0:
+        return None
+
     I = arr[0::2]
     Q = arr[1::2]
-    amplitudes = np.sqrt(I**2 + Q**2)
-    return float(np.mean(amplitudes))
+    return np.sqrt(I ** 2 + Q ** 2)
 
+
+# ========================================================================
+# ETAPE 4 - Normalisation (reference de calibration par session)
+# ========================================================================
 
 def normalize_per_session(df: pd.DataFrame) -> pd.DataFrame:
-    # Un seul signal d'amplitude moyenne par mesure (reduction des 380
-    # valeurs CSI brutes a UNE valeur representative du canal a cet
-    # instant precis).
-    df["amplitude_raw"] = df["csi_values"].apply(compute_mean_amplitude)
+    """Calcule les amplitudes par sous-porteuse pour chaque mesure, et une
+    reference d'echelle PAR SESSION (ecart-type de l'amplitude moyenne de
+    la session) -- utilisee plus tard uniquement pour mettre a l'echelle
+    les features de VARIATION temporelle (groupe C), jamais pour ecraser
+    les features de distribution/amplitude brutes (groupes A, B, D)."""
 
-    # Normalisation z-score, calculee INDEPENDAMMENT pour chaque session
-    # (chaque session garde sa propre reference de moyenne/ecart-type).
-    def zscore(group):
-        mean = group.mean()
-        std = group.std()
-        if std == 0 or pd.isna(std):
-            return group * 0.0   # session totalement plate, evite division par 0
-        return (group - mean) / std
+    df["amplitude_raw"] = df["csi_values"].apply(compute_csi_amplitudes)
 
-    df["amplitude_norm"] = df.groupby("session_id")["amplitude_raw"].transform(zscore)
+    n_before = len(df)
+    df = df[df["amplitude_raw"].notna()].reset_index(drop=True)
+    n_after = len(df)
+    if n_after < n_before:
+        print(f"ATTENTION: {n_before - n_after} mesures ecartees "
+              f"(vecteur CSI malforme).")
 
-    print(f"[Etape 4] Normalisation terminee: amplitude moyenne calculee "
-          f"et normalisee (z-score) pour chaque session.\n")
+    df["amplitude_raw_mean"] = df["amplitude_raw"].apply(lambda a: float(np.mean(a)))
+
+    # transform() aligne le resultat sur l'index d'origine (pas de risque
+    # de desalignement, contrairement a un merge sur cle) -- calcule
+    # STRICTEMENT a l'interieur de chaque session, jamais entre sessions.
+    df["session_amp_std"] = df.groupby("session_id")["amplitude_raw_mean"].transform("std")
+    df["session_amp_std"] = df["session_amp_std"].replace(0, np.nan)
+
+    print(f"[Etape 4] Normalisation terminee: amplitudes par sous-porteuse "
+          f"calculees, reference d'echelle par session etablie.\n")
     return df
 
 
@@ -120,9 +153,8 @@ def normalize_per_session(df: pd.DataFrame) -> pd.DataFrame:
 # ========================================================================
 
 def segment_into_label_blocks(df: pd.DataFrame) -> pd.DataFrame:
-    """Decoupe chaque session en blocs de label constant : une fenetre
-    ne doit jamais chevaucher un changement de label (ex: transition
-    -> stable) ni deux sessions differentes."""
+    """Une fenetre ne doit jamais chevaucher un changement de session ni
+    de label (effective_label)."""
     df["label_changed"] = (
         (df["session_id"] != df["session_id"].shift())
         | (df["effective_label"] != df["effective_label"].shift())
@@ -131,7 +163,7 @@ def segment_into_label_blocks(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def make_windows(df: pd.DataFrame) -> pd.DataFrame:
+def make_windows(df: pd.DataFrame) -> list[pd.DataFrame]:
     df = segment_into_label_blocks(df)
 
     windows = []
@@ -140,138 +172,282 @@ def make_windows(df: pd.DataFrame) -> pd.DataFrame:
         n = len(block)
 
         if n < WINDOW_SIZE:
-            continue   # bloc trop court pour former une seule fenetre complete
+            continue
 
         start = 0
         while start + WINDOW_SIZE <= n:
-            window_df = block.iloc[start:start + WINDOW_SIZE]
-            windows.append(window_df)
+            windows.append(block.iloc[start:start + WINDOW_SIZE])
             start += STRIDE
 
     print(f"[Etape 5] Segmentation terminee: {len(windows)} fenetres "
-          f"generees ({WINDOW_SIZE} mesures/fenetre, stride={STRIDE}), "
+          f"candidates ({WINDOW_SIZE} mesures/fenetre, stride={STRIDE}), "
           f"sans chevauchement de label ni de session.\n")
     return windows
 
 
 # ========================================================================
-# ETAPE 8.2 - Calcul des 9 caracteristiques par fenetre
+# Matrice d'amplitude par sous-porteuse pour une fenetre (avec validation)
 # ========================================================================
 
+def get_window_amplitude_matrix(window_df: pd.DataFrame) -> Optional[np.ndarray]:
+    """Empile les amplitudes de chaque mesure de la fenetre en une matrice
+    (n_mesures x n_sous_porteuses). Retourne None si les longueurs ne sont
+    pas homogenes au sein de la fenetre (securite supplementaire, en plus
+    du filtrage deja fait par clean_dataset.py)."""
+    arrays = window_df["amplitude_raw"].tolist()
+    lengths = {len(a) for a in arrays}
+    if len(lengths) != 1:
+        return None
+    return np.stack(arrays)
+
+
 # ========================================================================
-# Detection de pics (implementation numpy pure, sans scipy)
+# GROUPE A - Features globales d'amplitude CSI
 # ========================================================================
 
-def count_local_peaks(signal: np.ndarray) -> int:
-    """Compte les maxima locaux : un point est un pic s'il est
-    strictement superieur a ses deux voisins immediats. Equivalent
-    simple a scipy.signal.find_peaks() pour ce cas d'usage (petites
-    fenetres de quelques points), sans dependance externe."""
-    if len(signal) < 3:
-        return 0
-    is_peak = (signal[1:-1] > signal[:-2]) & (signal[1:-1] > signal[2:])
-    return int(np.sum(is_peak))
-
-
-def get_subcarrier_amplitude_matrix(window_df: pd.DataFrame) -> np.ndarray:
-    """Retourne une matrice (n_mesures x n_sous_porteuses) d'amplitudes,
-    SANS moyenner les sous-porteuses entre elles -- contrairement a
-    compute_mean_amplitude() qui ecrase toute la diversite spatiale du
-    signal CSI. Chaque colonne represente l'evolution d'UNE sous-porteuse
-    au fil des mesures de la fenetre."""
-    matrix = np.stack([
-        np.asarray(v, dtype=np.float64) for v in window_df["csi_values"]
-    ])
-    I = matrix[:, 0::2]
-    Q = matrix[:, 1::2]
-    return np.sqrt(I**2 + Q**2)   # shape: (n_mesures, n_sous_porteuses)
-
-
-def extract_subcarrier_diversity_features(window_df: pd.DataFrame) -> dict:
-    """Features complementaires aux 9 du dossier projet (section 8.2),
-    qui captent SPECIFIQUEMENT la diversite de comportement entre
-    sous-porteuses -- l'information que compute_mean_amplitude() perd
-    en moyennant tout. Le mouvement affecte generalement certaines
-    sous-porteuses beaucoup plus que d'autres (sensibilite au
-    multi-trajet variable selon la frequence), contrairement au bruit
-    de fond qui affecte les sous-porteuses de facon plus uniforme."""
-    amp_matrix = get_subcarrier_amplitude_matrix(window_df)   # (n_mesures, n_sc)
-
-    std_per_subcarrier = amp_matrix.std(axis=0)   # dispersion temporelle, PAR sous-porteuse
-
-    mean_std = float(np.mean(std_per_subcarrier))
-    max_std = float(np.max(std_per_subcarrier))
-    std_std = float(np.std(std_per_subcarrier))
-    peakiness = float(max_std / (mean_std + 1e-9))
+def extract_global_features(amp_matrix: np.ndarray) -> dict:
+    flat = amp_matrix.flatten()
+    p25, p75 = np.percentile(flat, [25, 75])
 
     return {
-        "subcarrier_std_mean": mean_std,
-        "subcarrier_std_max": max_std,
-        "subcarrier_std_std": std_std,
-        "subcarrier_std_peakiness": peakiness,
+        "amplitude_mean": float(np.mean(flat)),
+        "amplitude_std": float(np.std(flat)),
+        "amplitude_min": float(np.min(flat)),
+        "amplitude_max": float(np.max(flat)),
+        "amplitude_range": float(np.max(flat) - np.min(flat)),
+        "amplitude_median": float(np.median(flat)),
+        "amplitude_percentile_25": float(p25),
+        "amplitude_percentile_75": float(p75),
+        "amplitude_iqr": float(p75 - p25),
+        "amplitude_energy": float(np.sum(flat ** 2)),
     }
 
 
-def extract_features_from_window(window_df: pd.DataFrame) -> dict:
-    signal = window_df["amplitude_norm"].to_numpy()
+# ========================================================================
+# GROUPE B - Distribution par sous-porteuse
+# GROUPE E - Diversite temporelle entre sous-porteuses
+# (regroupes dans une seule fonction : E derive directement des memes
+#  statistiques par sous-porteuse que B, evite les doublons de calcul)
+# ========================================================================
 
-    moyenne = float(np.mean(signal))
-    variance = float(np.var(signal))
-    ecart_type = float(np.std(signal))
-    maximum = float(np.max(signal))
-    minimum = float(np.min(signal))
-    energie = float(np.sum(signal ** 2))
-
-    # Nombre de pics : detection de maxima locaux (indicateur de
-    # mouvement/perturbation dans la fenetre).
-    nombre_de_pics = count_local_peaks(signal)
-
-    # Variation moyenne : changement moyen absolu entre mesures successives.
-    variation_moyenne = float(np.mean(np.abs(np.diff(signal)))) if len(signal) > 1 else 0.0
-
-    # Stabilite temporelle : capacite a distinguer immobilite et
-    # mouvement -- definie ici comme l'inverse de la dispersion
-    # (1 = parfaitement stable, proche de 0 = tres instable).
-    stabilite_temporelle = float(1.0 / (1.0 + ecart_type))
-
-    # Amplitude moyenne CSI : amplitude brute moyenne (non normalisee),
-    # gardee separement de "Moyenne" (qui porte sur le signal normalise)
-    # pour respecter exactement l'intitule du dossier projet.
-    amplitude_moyenne_csi = float(np.mean(window_df["amplitude_raw"].to_numpy()))
+def extract_subcarrier_features(amp_matrix: np.ndarray) -> dict:
+    std_per_subcarrier = amp_matrix.std(axis=0)
+    mean_per_subcarrier = amp_matrix.mean(axis=0)
+    energy_per_subcarrier = np.sum(amp_matrix ** 2, axis=0)
 
     features = {
-        "moyenne": moyenne,
-        "variance": variance,
-        "ecart_type": ecart_type,
-        "maximum": maximum,
-        "minimum": minimum,
-        "energie_signal": energie,
-        "nombre_de_pics": nombre_de_pics,
-        "variation_moyenne": variation_moyenne,
-        "stabilite_temporelle": stabilite_temporelle,
-        "amplitude_moyenne_csi": amplitude_moyenne_csi,
+        # --- Groupe B : dispersion temporelle par sous-porteuse ---
+        "subcarrier_std_mean": float(np.mean(std_per_subcarrier)),
+        "subcarrier_std_max": float(np.max(std_per_subcarrier)),
+        "subcarrier_std_std": float(np.std(std_per_subcarrier)),
+        "subcarrier_std_range": float(np.max(std_per_subcarrier) - np.min(std_per_subcarrier)),
+        # ratio max/mean demande a la fois en groupe B et E dans le
+        # cahier des charges -- une seule feature, reutilisee (evite un
+        # nom duplique, cf. contrainte "no duplicate feature names").
+        "subcarrier_std_peakiness": float(
+            np.max(std_per_subcarrier) / (np.mean(std_per_subcarrier) + EPS)
+        ),
+
+        # --- Groupe B : niveau moyen par sous-porteuse ---
+        "subcarrier_mean_mean": float(np.mean(mean_per_subcarrier)),
+        "subcarrier_mean_std": float(np.std(mean_per_subcarrier)),
+        "subcarrier_mean_min": float(np.min(mean_per_subcarrier)),
+        "subcarrier_mean_max": float(np.max(mean_per_subcarrier)),
+        "subcarrier_mean_range": float(np.max(mean_per_subcarrier) - np.min(mean_per_subcarrier)),
+
+        # --- Groupe B : energie par sous-porteuse ---
+        "subcarrier_energy_mean": float(np.mean(energy_per_subcarrier)),
+        "subcarrier_energy_std": float(np.std(energy_per_subcarrier)),
+        "subcarrier_energy_min": float(np.min(energy_per_subcarrier)),
+        "subcarrier_energy_max": float(np.max(energy_per_subcarrier)),
+
+        # --- Groupe E : diversite / concentration des variations ---
+        # Coefficient de variation de la dispersion elle-meme : distingue
+        # "toutes les sous-porteuses varient un peu" (CV faible) de
+        # "quelques sous-porteuses varient beaucoup" (CV eleve) --
+        # exactement la distinction recherchee pour C1 vs C2.
+        "subcarrier_diversity_cv": float(
+            np.std(std_per_subcarrier) / (np.mean(std_per_subcarrier) + EPS)
+        ),
+        "subcarrier_std_iqr": float(
+            np.percentile(std_per_subcarrier, 75) - np.percentile(std_per_subcarrier, 25)
+        ),
+        "subcarrier_upper_to_median_std_ratio": float(
+            np.percentile(std_per_subcarrier, 90) / (np.median(std_per_subcarrier) + EPS)
+        ),
+        # Fraction de sous-porteuses "actives" (variation superieure a la
+        # mediane de la fenetre) : un mouvement fort/etendu devrait
+        # activer une plus grande fraction de sous-porteuses qu'un
+        # mouvement faible/localise.
+        "active_subcarrier_fraction": float(
+            np.mean(std_per_subcarrier > np.median(std_per_subcarrier))
+        ),
     }
-    features.update(extract_subcarrier_diversity_features(window_df))
     return features
 
 
-def build_feature_table(windows: list) -> pd.DataFrame:
+# ========================================================================
+# GROUPE D - Detection de pics (sur le signal global d'amplitude)
+# ========================================================================
+
+def extract_peak_features(signal: np.ndarray) -> dict:
+    """Detection de pics avec un critere de proeminence robuste (base sur
+    l'ecart-type du signal DANS la fenetre), pour eviter de compter
+    chaque micro-fluctuation comme un evenement de mouvement."""
+    n = len(signal)
+    if n < 3:
+        return {
+            "n_peaks": 0, "peak_density": 0.0,
+            "max_peak_magnitude": 0.0, "mean_peak_magnitude": 0.0,
+        }
+
+    is_local_max = (signal[1:-1] > signal[:-2]) & (signal[1:-1] > signal[2:])
+    candidates = signal[1:-1][is_local_max]
+
+    prominence_threshold = np.std(signal) * 0.5
+    baseline = np.mean(signal)
+    significant = candidates[(candidates - baseline) > prominence_threshold] if candidates.size else np.array([])
+
+    n_peaks = int(significant.size)
+    return {
+        "n_peaks": n_peaks,
+        "peak_density": float(n_peaks / n),
+        "max_peak_magnitude": float(np.max(significant)) if n_peaks > 0 else 0.0,
+        "mean_peak_magnitude": float(np.mean(significant)) if n_peaks > 0 else 0.0,
+    }
+
+
+# ========================================================================
+# GROUPE C - Dynamique temporelle (differences 1er et 2eme ordre)
+# ========================================================================
+
+def extract_temporal_features(amp_matrix: np.ndarray, session_amp_std: float) -> dict:
+    """Deux echelles complementaires :
+    - features "fines" (pooled) : differences PAR sous-porteuse, mises a
+      l'echelle par session (division par l'ecart-type de la session --
+      pas de soustraction de moyenne, pour eviter la degenerescence sur
+      les sessions a faible variance observee precedemment).
+    - features "globales" (temporal_variation_*) : sur le signal
+      d'amplitude moyenne par mesure, en ECHELLE BRUTE (complementaire,
+      capture la dynamique d'ensemble sans dependre de la mise a
+      l'echelle par session)."""
+
+    if session_amp_std is None or pd.isna(session_amp_std) or session_amp_std == 0:
+        scaled_matrix = amp_matrix
+    else:
+        scaled_matrix = amp_matrix / session_amp_std
+
+    dx = np.diff(scaled_matrix, axis=0)
+    abs_dx = np.abs(dx).flatten()
+
+    if abs_dx.size:
+        q1, q3 = np.percentile(abs_dx, [25, 75])
+        threshold = np.median(abs_dx) + 1.5 * (q3 - q1)
+        fraction_large_changes = float(np.mean(abs_dx > threshold))
+    else:
+        fraction_large_changes = 0.0
+
+    d2x = np.diff(dx, axis=0).flatten() if dx.shape[0] > 1 else np.array([])
+
+    global_signal = amp_matrix.mean(axis=1)   # brut, non mis a l'echelle
+    global_dx = np.diff(global_signal)
+
+    features = {
+        # --- differences fines, mises a l'echelle par session ---
+        "mean_absolute_difference": float(np.mean(abs_dx)) if abs_dx.size else 0.0,
+        "std_absolute_difference": float(np.std(abs_dx)) if abs_dx.size else 0.0,
+        "max_absolute_difference": float(np.max(abs_dx)) if abs_dx.size else 0.0,
+        "fraction_large_changes": fraction_large_changes,
+        "second_diff_mean": float(np.mean(d2x)) if d2x.size else 0.0,
+        "second_diff_std": float(np.std(d2x)) if d2x.size else 0.0,
+        "second_diff_energy": float(np.sum(d2x ** 2)) if d2x.size else 0.0,
+
+        # --- dynamique globale, echelle brute ---
+        "temporal_variation_mean": float(np.mean(np.abs(global_dx))) if global_dx.size else 0.0,
+        "temporal_variation_std": float(np.std(np.abs(global_dx))) if global_dx.size else 0.0,
+        "temporal_variation_max": float(np.max(np.abs(global_dx))) if global_dx.size else 0.0,
+        "temporal_variation_energy": float(np.sum(global_dx ** 2)) if global_dx.size else 0.0,
+    }
+
+    features.update(extract_peak_features(global_signal))
+    return features
+
+
+# ========================================================================
+# GROUPE F - RSSI
+# ========================================================================
+
+def extract_rssi_features(window_df: pd.DataFrame) -> dict:
+    rssi = window_df["rssi"].to_numpy(dtype=np.float64)
+    d = np.diff(rssi)
+
+    return {
+        "rssi_mean": float(np.mean(rssi)),
+        "rssi_std": float(np.std(rssi)),
+        "rssi_min": float(np.min(rssi)),
+        "rssi_max": float(np.max(rssi)),
+        "rssi_range": float(np.max(rssi) - np.min(rssi)),
+        "rssi_median": float(np.median(rssi)),
+        "rssi_variation_mean": float(np.mean(np.abs(d))) if d.size else 0.0,
+        "rssi_variation_std": float(np.std(np.abs(d))) if d.size else 0.0,
+    }
+
+
+# ========================================================================
+# Assemblage : une fenetre -> un vecteur de features complet
+# ========================================================================
+
+def extract_features_from_window(window_df: pd.DataFrame) -> Optional[dict]:
+    amp_matrix = get_window_amplitude_matrix(window_df)
+    if amp_matrix is None:
+        return None
+
+    session_amp_std = window_df["session_amp_std"].iloc[0]
+
+    features = {}
+    features.update(extract_global_features(amp_matrix))
+    features.update(extract_subcarrier_features(amp_matrix))
+    features.update(extract_temporal_features(amp_matrix, session_amp_std))
+    features.update(extract_rssi_features(window_df))
+
+    # Metadonnees (JAMAIS utilisees comme features ML -- voir train_model.py,
+    # ou FEATURE_COLUMNS doit lister explicitement les colonnes numeriques
+    # ci-dessus, jamais celles-ci).
+    features["session_id"] = window_df["session_id"].iloc[0]
+    features["scenario"] = window_df["scenario"].iloc[0]
+    features["effective_label"] = window_df["effective_label"].iloc[0]
+    features["window_start_timestamp_us"] = window_df["timestamp_us"].iloc[0]
+    features["window_end_timestamp_us"] = window_df["timestamp_us"].iloc[-1]
+    features["n_samples_in_window"] = len(window_df)
+
+    return features
+
+
+def build_feature_table(windows: list[pd.DataFrame]) -> pd.DataFrame:
     rows = []
+    n_discarded = 0
+
     for window_df in windows:
         features = extract_features_from_window(window_df)
-
-        features["session_id"] = window_df["session_id"].iloc[0]
-        features["scenario"] = window_df["scenario"].iloc[0]
-        features["effective_label"] = window_df["effective_label"].iloc[0]
-        features["window_start_timestamp_us"] = window_df["timestamp_us"].iloc[0]
-        features["window_end_timestamp_us"] = window_df["timestamp_us"].iloc[-1]
-        features["n_samples_in_window"] = len(window_df)
-
+        if features is None:
+            n_discarded += 1
+            continue
         rows.append(features)
 
+    if n_discarded > 0:
+        print(f"ATTENTION: {n_discarded} fenetre(s) ecartee(s) "
+              f"(longueurs de vecteurs CSI incoherentes au sein de la fenetre).")
+
     feature_df = pd.DataFrame(rows)
-    print(f"[Etape 8.2] Extraction des 9 caracteristiques terminee: "
-          f"{len(feature_df)} fenetres x 9 features + metadonnees.\n")
+
+    n_feature_cols = len([c for c in feature_df.columns if c not in (
+        "session_id", "scenario", "effective_label",
+        "window_start_timestamp_us", "window_end_timestamp_us", "n_samples_in_window",
+    )])
+
+    print(f"[Extraction] Termine: {len(feature_df)} fenetres valides "
+          f"({n_discarded} ecartees), {n_feature_cols} features numeriques "
+          f"+ 6 colonnes de metadonnees.\n")
     return feature_df
 
 
@@ -286,22 +462,32 @@ def main():
         )
 
     df = pd.read_parquet(INPUT_PARQUET)
-    print(f"Dataset nettoye charge: {len(df)} lignes.\n")
+    print(f"Dataset nettoye charge: {len(df)} mesures.\n")
 
-    df = align_temporal(df)                # Etape 3
-    df = normalize_per_session(df)         # Etape 4
-    windows = make_windows(df)             # Etape 5
-    feature_df = build_feature_table(windows)   # Etape 8.2
+    df = align_temporal(df)
+    df = normalize_per_session(df)
+    windows = make_windows(df)
+    feature_df = build_feature_table(windows)
 
     print("=" * 60)
-    print("DISTRIBUTION DES CLASSES (par fenetre)")
+    print("DISTRIBUTION DES CLASSES (par fenetre, effective_label)")
     print("=" * 60)
     counts = feature_df["effective_label"].value_counts()
     total = len(feature_df)
     for label, count in counts.items():
-        pct = 100 * count / total
-        print(f"  {label:20s} {count:6d} ({pct:5.1f}%)")
-    print(f"\n  TOTAL: {total} fenetres\n")
+        pct = 100 * count / total if total else 0
+        print(f"  {str(label):35s} {count:6d} ({pct:5.1f}%)")
+    print(f"\n  TOTAL: {total} fenetres, "
+          f"{feature_df['session_id'].nunique()} sessions\n")
+
+    feature_columns = [c for c in feature_df.columns if c not in (
+        "session_id", "scenario", "effective_label",
+        "window_start_timestamp_us", "window_end_timestamp_us", "n_samples_in_window",
+    )]
+    print(f"Liste des {len(feature_columns)} features generees :")
+    for name in feature_columns:
+        print(f"  - {name}")
+    print()
 
     feature_df.to_parquet(OUTPUT_PARQUET, index=False)
     feature_df.to_csv(OUTPUT_CSV_PREVIEW, index=False)

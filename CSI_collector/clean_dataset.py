@@ -124,6 +124,28 @@ def flag_rssi_anomalies(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def clean_marker_state(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    marker_state n'est pertinent que pour les scenarios
+    entree_zone et sortie_zone.
+
+    Pour tous les autres scenarios, marker_state est mis a NaN.
+    Les valeurs des scenarios entree_zone / sortie_zone sont conservees.
+    """
+
+    non_transition = ~df["scenario"].isin(TRANSITION_SCENARIOS)
+
+    n_changed = int(non_transition.sum())
+
+    df.loc[non_transition, "marker_state"] = float("nan")
+
+    print(
+        f"marker_state : {n_changed} lignes hors entree/sortie "
+        f"mises a NaN."
+    )
+
+    return df
+
 def compute_effective_label(df: pd.DataFrame) -> pd.DataFrame:
     def label_for_row(row):
         if row["scenario"] in TRANSITION_SCENARIOS:
@@ -145,6 +167,10 @@ def main():
     df = check_csi_len(df)
     df = parse_and_clean_csi(df)
     df = flag_rssi_anomalies(df)
+    # marker_state uniquement pour entree_zone / sortie_zone
+    df = clean_marker_state(df)
+
+    # Calcul du label effectif
     df = compute_effective_label(df)
 
     print("\n" + "=" * 60)

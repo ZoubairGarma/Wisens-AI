@@ -75,11 +75,14 @@ EPS = 1e-9   # evite les divisions par zero sans fausser les ratios
 
 
 # ========================================================================
-# ETAPE 3 - Alignement temporel
+# ETAPE 3 - ALIGNEMENT TEMPOREL
 # ========================================================================
 
 def align_temporal(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.sort_values(["session_id", "timestamp_us"]).reset_index(drop=True)
+
+    df = df.sort_values(
+        ["session_id", "timestamp_us"]
+    ).reset_index(drop=True)
 
     df["gap_us"] = df.groupby("session_id")["timestamp_us"].diff()
     big_gaps = df[df["gap_us"] > GAP_THRESHOLD_US]
@@ -88,8 +91,11 @@ def align_temporal(df: pd.DataFrame) -> pd.DataFrame:
               f"detectes dans {big_gaps['session_id'].nunique()} session(s). "
               f"Sessions concernees: {sorted(big_gaps['session_id'].unique())}")
 
-    print(f"[Etape 3] Alignement temporel termine: {len(df)} lignes triees "
-          f"par session/timestamp.\n")
+    print(
+        f"[Etape 3] Alignement terminé: "
+        f"{len(df)} lignes."
+    )
+
     return df
 
 
@@ -149,7 +155,7 @@ def normalize_per_session(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ========================================================================
-# ETAPE 5 - Segmentation par fenetres temporelles
+# ETAPE 5 - SEGMENTATION
 # ========================================================================
 
 def segment_into_label_blocks(df: pd.DataFrame) -> pd.DataFrame:
@@ -157,9 +163,12 @@ def segment_into_label_blocks(df: pd.DataFrame) -> pd.DataFrame:
     de label (effective_label)."""
     df["label_changed"] = (
         (df["session_id"] != df["session_id"].shift())
-        | (df["effective_label"] != df["effective_label"].shift())
+        |
+        (df["effective_label"] != df["effective_label"].shift())
     )
+
     df["block_id"] = df["label_changed"].cumsum()
+
     return df
 
 
@@ -167,14 +176,19 @@ def make_windows(df: pd.DataFrame) -> list[pd.DataFrame]:
     df = segment_into_label_blocks(df)
 
     windows = []
+
     for block_id, block in df.groupby("block_id"):
+
         block = block.reset_index(drop=True)
+
         n = len(block)
 
         if n < WINDOW_SIZE:
             continue
+            continue
 
         start = 0
+
         while start + WINDOW_SIZE <= n:
             windows.append(block.iloc[start:start + WINDOW_SIZE])
             start += STRIDE
@@ -456,9 +470,12 @@ def build_feature_table(windows: list[pd.DataFrame]) -> pd.DataFrame:
 # ========================================================================
 
 def main():
+
     if not os.path.exists(INPUT_PARQUET):
+
         raise FileNotFoundError(
-            f"'{INPUT_PARQUET}' introuvable. Lance d'abord clean_dataset.py."
+            f"'{INPUT_PARQUET}' introuvable. "
+            f"Lance d'abord clean_dataset.py."
         )
 
     df = pd.read_parquet(INPUT_PARQUET)
@@ -474,6 +491,7 @@ def main():
     print("=" * 60)
     counts = feature_df["effective_label"].value_counts()
     total = len(feature_df)
+
     for label, count in counts.items():
         pct = 100 * count / total if total else 0
         print(f"  {str(label):35s} {count:6d} ({pct:5.1f}%)")
@@ -492,8 +510,18 @@ def main():
     feature_df.to_parquet(OUTPUT_PARQUET, index=False)
     feature_df.to_csv(OUTPUT_CSV_PREVIEW, index=False)
 
-    print(f"Dataset de features sauvegarde: {os.path.abspath(OUTPUT_PARQUET)}")
-    print(f"Apercu CSV sauvegarde: {os.path.abspath(OUTPUT_CSV_PREVIEW)}")
+    print()
+    print("=" * 70)
+    print("SAUVEGARDE TERMINEE")
+    print("=" * 70)
+
+    print(
+        f"Parquet: {os.path.abspath(OUTPUT_PARQUET)}"
+    )
+
+    print(
+        f"CSV:     {os.path.abspath(OUTPUT_CSV)}"
+    )
 
 
 if __name__ == "__main__":
